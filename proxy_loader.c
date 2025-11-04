@@ -20,8 +20,8 @@
 #include "command.h"
 
 #define PROXY_VALIDATOR_DEFAULT_TIMEOUT_MS 5000
-#define PROXY_VALIDATOR_DEFAULT_CONCURRENCY 10
-#define PROXY_VALIDATOR_MAX_CONCURRENCY 128
+#define PROXY_VALIDATOR_DEFAULT_CONCURRENCY 50
+#define PROXY_VALIDATOR_MAX_CONCURRENCY 500
 
 static const char *proxy_type_name(enum proxy_type type)
 {
@@ -363,21 +363,27 @@ int check_and_validate_proxies(const char *test_host, int test_port, int timeout
     if (timeout_ms <= 0)
         timeout_ms = PROXY_VALIDATOR_DEFAULT_TIMEOUT_MS;
 
-    if (xconnect.proxy_loader_concurrency > 0)
-        concurrency = xconnect.proxy_loader_concurrency;
-    else
-        concurrency = PROXY_VALIDATOR_DEFAULT_CONCURRENCY;
-
-    if (concurrency < 1)
-        concurrency = 1;
-    if (concurrency > PROXY_VALIDATOR_MAX_CONCURRENCY)
-        concurrency = PROXY_VALIDATOR_MAX_CONCURRENCY;
-
     int total = xconnect.proxy_count;
     if (total <= 0) {
         err_printf("Proxy list is empty.\n");
         return -1;
     }
+
+    if (xconnect.proxy_loader_concurrency > 0) {
+        concurrency = xconnect.proxy_loader_concurrency;
+    } else {
+        concurrency = PROXY_VALIDATOR_DEFAULT_CONCURRENCY;
+        if (total > concurrency) {
+            int scaled = (total + 19) / 20;
+            if (scaled > concurrency)
+                concurrency = scaled;
+        }
+    }
+
+    if (concurrency < 1)
+        concurrency = 1;
+    if (concurrency > PROXY_VALIDATOR_MAX_CONCURRENCY)
+        concurrency = PROXY_VALIDATOR_MAX_CONCURRENCY;
 
     ctx.items = (proxy **)calloc((size_t)total, sizeof(proxy *));
     if (!ctx.items) {

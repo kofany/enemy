@@ -17,8 +17,9 @@ The proxy loader now automatically validates proxies after loading, with concurr
 - Falls back to auto-detection if the specified protocol fails
 
 ### Concurrent Checking
-- Multiple proxies are checked simultaneously (default: 10 concurrent connections)
-- Configurable concurrency: `--concurrency N` (1-100)
+- Multiple proxies are checked simultaneously (default: 50 concurrent connections, auto-scales for large lists)
+- Configurable concurrency: `--concurrency N` (1-500)
+- Auto-scaling: For lists larger than default concurrency, automatically scales to ~5% of total proxies
 - Significantly faster than serial checking for large proxy lists
 
 ### Timeout Configuration
@@ -35,7 +36,7 @@ The proxy loader now automatically validates proxies after loading, with concurr
 ### Load Proxies with Validation
 ```
 .proxy <filename>
-.proxy <filename> --concurrency 10 --timeout 5000
+.proxy <filename> --concurrency 100 --timeout 5000
 .proxy socks5 <filename>
 .proxy <filename> --no-check        # Skip validation
 .proxy <filename> --save validated.txt
@@ -44,7 +45,7 @@ The proxy loader now automatically validates proxies after loading, with concurr
 ### Re-validate Existing Proxies
 ```
 .proxy check
-.proxy check --concurrency 20 --timeout 3000
+.proxy check --concurrency 150 --timeout 3000
 .proxy check --save working.txt
 ```
 
@@ -69,7 +70,7 @@ Shows:
 |--------|-------------|---------|-------|
 | `--check` | Validate proxies after loading | ON | - |
 | `--no-check` | Skip validation | OFF | - |
-| `--concurrency N` | Number of concurrent checks | 10 | 1-100 |
+| `--concurrency N` | Number of concurrent checks | Auto (min 50) | 1-500 |
 | `--timeout MS` | Connect/handshake timeout (ms) | 5000 | 100-60000 |
 | `--save <file>` | Save validated proxies to file | - | - |
 | `--test-host <host>` | Test destination host | irc.libera.chat | - |
@@ -149,13 +150,16 @@ Proxy struct fields:
 ## Performance
 
 - **Serial** (concurrency=1): ~5 seconds per proxy (with 5s timeout)
-- **Concurrent** (concurrency=10): ~5 seconds for 10 proxies simultaneously
 - **Concurrent** (concurrency=50): ~5 seconds for 50 proxies simultaneously
+- **Concurrent** (concurrency=100): ~5 seconds for 100 proxies simultaneously
+- **Concurrent** (concurrency=200): ~5 seconds for 200 proxies simultaneously
 
-For 1000 proxies with 5s timeout:
-- Serial: ~5000 seconds (~83 minutes)
-- Concurrency=10: ~500 seconds (~8 minutes)
-- Concurrency=50: ~100 seconds (~1.7 minutes)
+For 2000 proxies with 5s timeout:
+- Serial: ~10000 seconds (~2.8 hours)
+- Concurrency=50: ~200 seconds (~3.3 minutes)
+- Concurrency=100 (auto-scaled): ~100 seconds (~1.7 minutes)
+- Concurrency=200: ~50 seconds (~0.8 minutes)
+- Concurrency=500: ~20 seconds (~0.3 minutes)
 
 ## Thread Safety
 
