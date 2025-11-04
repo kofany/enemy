@@ -1954,9 +1954,13 @@ void do_connect(void)
     }
 
     if (--xconnect.connecting > 0) {
-        xconnect.timer = xconnect.delay;
-        if (xconnect.delay > 0 && debuglvl > 0)
-            info_printf("Delaying next connect()..\n");
+        if (!xconnect.proxy_list) {
+            xconnect.timer = xconnect.delay;
+            if (xconnect.delay > 0 && debuglvl > 0)
+                info_printf("Delaying next connect()..\n");
+        } else {
+            xconnect.timer = 0;
+        }
     }
 
     if ((p = new_clone(socket_family)) == 0) {

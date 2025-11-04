@@ -409,12 +409,17 @@ int socks4_connect(int sockfd, const char *dest_host, int dest_port, const char 
     buf[len++] = 0;
 
     if (write(sockfd, buf, len) != len) {
-        err_printf("socks4_connect()->write(): %s\n", strerror(errno));
+        err_printf("socks4_connect()->write(): %s (proxy disconnected)\n", strerror(errno));
         return -1;
     }
 
-    if (read(sockfd, buf, 8) != 8) {
-        err_printf("socks4_connect()->read(): %s\n", strerror(errno));
+    ssize_t n = read(sockfd, buf, 8);
+    if (n != 8) {
+        if (n < 0) {
+            err_printf("socks4_connect()->read(): %s (proxy not responding)\n", strerror(errno));
+        } else {
+            err_printf("socks4_connect()->read(): unexpected EOF (proxy closed connection)\n");
+        }
         return -1;
     }
 
@@ -430,6 +435,7 @@ int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char 
 {
     unsigned char buf[512];
     int len;
+    ssize_t n;
 
     buf[0] = 5;
     if (username && password && *username && *password) {
@@ -444,17 +450,22 @@ int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char 
     }
 
     if (write(sockfd, buf, len) != len) {
-        err_printf("socks5_connect()->write(): %s\n", strerror(errno));
+        err_printf("socks5_connect()->write(): %s (proxy disconnected during handshake)\n", strerror(errno));
         return -1;
     }
 
-    if (read(sockfd, buf, 2) != 2) {
-        err_printf("socks5_connect()->read(): %s\n", strerror(errno));
+    n = read(sockfd, buf, 2);
+    if (n != 2) {
+        if (n < 0) {
+            err_printf("socks5_connect()->read(): %s (proxy not responding or bad SOCKS5 server)\n", strerror(errno));
+        } else {
+            err_printf("socks5_connect()->read(): unexpected EOF (proxy closed connection)\n");
+        }
         return -1;
     }
 
     if (buf[0] != 5) {
-        err_printf("socks5_connect(): invalid SOCKS version\n");
+        err_printf("socks5_connect(): invalid SOCKS version (got %d, expected 5)\n", buf[0]);
         return -1;
     }
 
@@ -469,12 +480,17 @@ int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char 
 
         len = 3 + ulen + plen;
         if (write(sockfd, buf, len) != len) {
-            err_printf("socks5_connect()->write(auth): %s\n", strerror(errno));
+            err_printf("socks5_connect()->write(auth): %s (proxy disconnected during authentication)\n", strerror(errno));
             return -1;
         }
 
-        if (read(sockfd, buf, 2) != 2) {
-            err_printf("socks5_connect()->read(auth): %s\n", strerror(errno));
+        n = read(sockfd, buf, 2);
+        if (n != 2) {
+            if (n < 0) {
+                err_printf("socks5_connect()->read(auth): %s (proxy did not complete authentication)\n", strerror(errno));
+            } else {
+                err_printf("socks5_connect()->read(auth): unexpected EOF (proxy closed connection during authentication)\n");
+            }
             return -1;
         }
 
@@ -499,12 +515,17 @@ int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char 
 
     len = 7 + len;
     if (write(sockfd, buf, len) != len) {
-        err_printf("socks5_connect()->write(connect): %s\n", strerror(errno));
+        err_printf("socks5_connect()->write(connect): %s (proxy disconnected while establishing tunnel)\n", strerror(errno));
         return -1;
     }
 
-    if (read(sockfd, buf, 4) < 4) {
-        err_printf("socks5_connect()->read(connect): %s\n", strerror(errno));
+    n = read(sockfd, buf, 4);
+    if (n < 4) {
+        if (n < 0) {
+            err_printf("socks5_connect()->read(connect): %s (proxy did not confirm tunnel)\n", strerror(errno));
+        } else {
+            err_printf("socks5_connect()->read(connect): unexpected EOF (proxy closed connection before confirmation)\n");
+        }
         return -1;
     }
 
@@ -568,7 +589,7 @@ int http_connect(int sockfd, const char *dest_host, int dest_port, const char *u
     len += snprintf(buf + len, sizeof(buf) - len, "\r\n");
 
     if (write(sockfd, buf, len) != len) {
-        err_printf("http_connect()->write(): %s\n", strerror(errno));
+        err_printf("http_connect()->write(): %s (proxy disconnected)\n", strerror(errno));
         return -1;
     }
 
@@ -576,7 +597,11 @@ int http_connect(int sockfd, const char *dest_host, int dest_port, const char *u
     while (len < sizeof(buf) - 1) {
         int n = read(sockfd, buf + len, 1);
         if (n <= 0) {
-            err_printf("http_connect()->read(): %s\n", strerror(errno));
+            if (n < 0) {
+                err_printf("http_connect()->read(): %s (proxy not responding)\n", strerror(errno));
+            } else {
+                err_printf("http_connect()->read(): unexpected EOF (proxy closed connection)\n");
+            }
             return -1;
         }
         len += n;
@@ -586,7 +611,7 @@ int http_connect(int sockfd, const char *dest_host, int dest_port, const char *u
     buf[len] = '\0';
 
     if (strncmp(buf, "HTTP/1.", 7) != 0) {
-        err_printf("http_connect(): invalid HTTP response\n");
+        err_printf("http_connect(): invalid HTTP response (not an HTTP proxy)\n");
         return -1;
     }
 
@@ -594,7 +619,7 @@ int http_connect(int sockfd, const char *dest_host, int dest_port, const char *u
     int status_code = atoi(status);
 
     if (status_code != 200) {
-        err_printf("http_connect(): connection failed (HTTP %d)\n", status_code);
+        err_printf("http_connect(): connection failed (HTTP %d - proxy rejected request)\n", status_code);
         return -1;
     }
 
@@ -619,7 +644,7 @@ int connect_through_proxy(int sockfd, proxy *p, const char *dest_host, int dest_
 
     if (connect(sockfd, proxy_addr, proxy_addrlen) == -1) {
         if (errno != EINPROGRESS) {
-            err_printf("connect_through_proxy()->connect(): %s\n", strerror(errno));
+            err_printf("connect_through_proxy()->connect(): %s (proxy may be offline)\n", strerror(errno));
             return -1;
         }
     }
@@ -633,27 +658,63 @@ int connect_through_proxy(int sockfd, proxy *p, const char *dest_host, int dest_
 
     int ret = select(sockfd + 1, NULL, &wfds, NULL, &tv);
     if (ret <= 0) {
-        err_printf("connect_through_proxy()->select(): timeout or error\n");
+        err_printf("connect_through_proxy()->select(): timeout or error (proxy may be offline or slow)\n");
         return -1;
     }
 
     int err;
     socklen_t errlen = sizeof(err);
     if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0 || err != 0) {
-        err_printf("connect_through_proxy()->getsockopt(): %s\n", strerror(err ? err : errno));
+        err_printf("connect_through_proxy()->getsockopt(): %s (proxy refused connection)\n", strerror(err ? err : errno));
         return -1;
     }
 
+    const char *ptype_name = "UNKNOWN";
     switch (p->type) {
     case PROXY_SOCKS4:
-        return socks4_connect(sockfd, dest_host, dest_port, p->username);
+        ptype_name = "SOCKS4";
+        break;
     case PROXY_SOCKS5:
-        return socks5_connect(sockfd, dest_host, dest_port, p->username, p->password);
+        ptype_name = "SOCKS5";
+        break;
     case PROXY_HTTP:
+        ptype_name = "HTTP";
+        break;
     case PROXY_HTTPS:
-        return http_connect(sockfd, dest_host, dest_port, p->username, p->password);
+        ptype_name = "HTTPS";
+        break;
     default:
         err_printf("connect_through_proxy(): unsupported proxy type\n");
         return -1;
     }
+
+    info_printf("Proxy %s:%d (%s) connected, negotiating tunnel to %s:%d\n",
+                p->host, p->port, ptype_name, dest_host, dest_port);
+
+    int result;
+    switch (p->type) {
+    case PROXY_SOCKS4:
+        result = socks4_connect(sockfd, dest_host, dest_port, p->username);
+        break;
+    case PROXY_SOCKS5:
+        result = socks5_connect(sockfd, dest_host, dest_port, p->username, p->password);
+        break;
+    case PROXY_HTTP:
+    case PROXY_HTTPS:
+        result = http_connect(sockfd, dest_host, dest_port, p->username, p->password);
+        break;
+    default:
+        result = -1;
+        break;
+    }
+
+    if (result == 0) {
+        info_printf("Proxy %s:%d (%s) is online and tunneling %s:%d\n",
+                    p->host, p->port, ptype_name, dest_host, dest_port);
+    } else {
+        info_printf("Proxy %s:%d (%s) is reachable but negotiation failed\n",
+                    p->host, p->port, ptype_name);
+    }
+
+    return result;
 }
