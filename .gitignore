@@ -1,0 +1,7 @@
+*.o
+enemy
+enemy.debug
+*.swp
+*.swo
+*~
+.DS_Store
