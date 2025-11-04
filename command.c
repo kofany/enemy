@@ -1798,23 +1798,70 @@ void parse_input(void)
     } else if (!x_strncasecmp(w, "proxy", 5)) {
         if (!*cmd) {
             if (xconnect.proxy_list) {
+                int validated = 0;
+                int socks5 = 0, socks4 = 0, http = 0;
+                proxy *p;
+                
+                for (p = xconnect.proxy_list; p; p = p->next) {
+                    if (p->validated) {
+                        validated++;
+                        switch (p->type) {
+                            case PROXY_SOCKS5: socks5++; break;
+                            case PROXY_SOCKS4: socks4++; break;
+                            case PROXY_HTTP:
+                            case PROXY_HTTPS: http++; break;
+                            default: break;
+                        }
+                    }
+                }
+                
                 info_printf("Proxies loaded: %d\n", xconnect.proxy_count);
                 if (xconnect.proxy_file) {
                     info_printf("  File: %s\n", xconnect.proxy_file);
                 }
                 info_printf("  Type: ");
                 switch (xconnect.proxy_default_type) {
-                    case PROXY_HTTP: info_printf("HTTP\n"); break;
-                    case PROXY_HTTPS: info_printf("HTTPS\n"); break;
-                    case PROXY_SOCKS4: info_printf("SOCKS4\n"); break;
-                    case PROXY_SOCKS5: info_printf("SOCKS5\n"); break;
-                    default: info_printf("Unknown\n"); break;
+                    case PROXY_HTTP: {
+                        info_printf("HTTP\n");
+                        break;
+                    }
+                    case PROXY_HTTPS: {
+                        info_printf("HTTPS\n");
+                        break;
+                    }
+                    case PROXY_SOCKS4: {
+                        info_printf("SOCKS4\n");
+                        break;
+                    }
+                    case PROXY_SOCKS5: {
+                        info_printf("SOCKS5\n");
+                        break;
+                    }
+                    default: {
+                        info_printf("Auto-detect\n");
+                        break;
+                    }
+                }
+                if (validated > 0) {
+                    info_printf("  Validated: %d", validated);
+                    if (socks5 + socks4 + http > 0) {
+                        printf(" (SOCKS5=%d, SOCKS4=%d, HTTP=%d)", socks5, socks4, http);
+                    }
+                    printf("\n");
                 }
             } else {
                 help_printf("Usage: proxy <filename> [options]\n");
-                help_printf("       proxy <socks4|socks5|http|https> <filename>\n");
-                help_printf("       proxy check [--timeout <ms>] [--save <file>]\n");
+                help_printf("       proxy <socks4|socks5|http|https> <filename> [options]\n");
+                help_printf("       proxy check [options]\n");
                 help_printf("       proxy clear\n");
+                help_printf("\nOptions:\n");
+                help_printf("  --check           Validate proxies after loading (default)\n");
+                help_printf("  --no-check        Skip validation\n");
+                help_printf("  --concurrency <N> Number of concurrent checks (1-100, default: 10)\n");
+                help_printf("  --timeout <ms>    Connect/handshake timeout (100-60000ms, default: 5000)\n");
+                help_printf("  --save <file>     Save validated proxies to file\n");
+                help_printf("  --test-host <h>   Test host (default: irc.libera.chat)\n");
+                help_printf("  --test-port <p>   Test port (default: 6667)\n");
             }
         } else {
             w = newsplit(&cmd);
@@ -1823,6 +1870,7 @@ void parse_input(void)
                 info_printf("Proxy list cleared.\n");
             } else if (!x_strcasecmp(w, "check") || !x_strcasecmp(w, "validate")) {
                 int timeout_ms = 5000;
+                int concurrency = xconnect.proxy_loader_concurrency > 0 ? xconnect.proxy_loader_concurrency : 10;
                 char *save_file = NULL;
                 char *test_host = "irc.libera.chat";
                 int test_port = 6667;
@@ -1836,6 +1884,11 @@ void parse_input(void)
                             if (timeout_ms < 100) timeout_ms = 100;
                             if (timeout_ms > 60000) timeout_ms = 60000;
                         }
+                    } else if (!x_strcasecmp(opt, "--concurrency")) {
+                        char *val = newsplit(&cmd);
+                        if (val && *val) {
+                            concurrency = atoi(val);
+                        }
                     } else if (!x_strcasecmp(opt, "--save")) {
                         save_file = newsplit(&cmd);
                     } else if (!x_strcasecmp(opt, "--test-host")) {
@@ -1848,6 +1901,11 @@ void parse_input(void)
                     }
                 }
 
+                if (concurrency < 1) concurrency = 1;
+                if (concurrency > 100) concurrency = 100;
+                xconnect.proxy_loader_concurrency = concurrency;
+                xconnect.proxy_loader_timeout_ms = timeout_ms;
+
                 int working = check_and_validate_proxies(test_host, test_port, timeout_ms, 1);
                 if (working > 0 && save_file && *save_file) {
                     save_validated_proxies(save_file);
@@ -1855,9 +1913,13 @@ void parse_input(void)
             } else {
                 enum proxy_type ptype = PROXY_NONE;
                 char *filename = NULL;
-                int do_check = 0;
+                int do_check = 1;
+                int no_check = 0;
                 int timeout_ms = 5000;
+                int concurrency = xconnect.proxy_loader_concurrency > 0 ? xconnect.proxy_loader_concurrency : 10;
                 char *save_file = NULL;
+                char *test_host = "irc.libera.chat";
+                int test_port = 6667;
 
                 if (!x_strcasecmp(w, "http"))
                     ptype = PROXY_HTTP;
@@ -1886,15 +1948,36 @@ void parse_input(void)
                     char *opt = newsplit(&cmd);
                     if (!x_strcasecmp(opt, "--check") || !x_strcasecmp(opt, "-c")) {
                         do_check = 1;
+                        no_check = 0;
+                    } else if (!x_strcasecmp(opt, "--no-check")) {
+                        no_check = 1;
+                        do_check = 0;
                     } else if (!x_strcasecmp(opt, "--timeout")) {
                         char *val = newsplit(&cmd);
                         if (val && *val) {
                             timeout_ms = atoi(val);
+                            if (timeout_ms < 100) timeout_ms = 100;
+                            if (timeout_ms > 60000) timeout_ms = 60000;
+                        }
+                    } else if (!x_strcasecmp(opt, "--concurrency")) {
+                        char *val = newsplit(&cmd);
+                        if (val && *val) {
+                            concurrency = atoi(val);
                         }
                     } else if (!x_strcasecmp(opt, "--save")) {
                         save_file = newsplit(&cmd);
+                    } else if (!x_strcasecmp(opt, "--test-host")) {
+                        test_host = newsplit(&cmd);
+                    } else if (!x_strcasecmp(opt, "--test-port")) {
+                        char *val = newsplit(&cmd);
+                        if (val && *val) {
+                            test_port = atoi(val);
+                        }
                     }
                 }
+
+                if (concurrency < 1) concurrency = 1;
+                if (concurrency > 100) concurrency = 100;
 
                 int ret = load_proxies(filename, ptype);
                 if (ret > 0) {
@@ -1902,9 +1985,11 @@ void parse_input(void)
                         logit(">> .proxy loaded %d proxies from %s\n", ret, filename);
                     }
 
-                    if (do_check) {
-                        info_printf("Validating proxies...\n");
-                        int working = check_and_validate_proxies("irc.libera.chat", 6667, timeout_ms, 1);
+                    if (!no_check && do_check) {
+                        xconnect.proxy_loader_concurrency = concurrency;
+                        xconnect.proxy_loader_timeout_ms = timeout_ms;
+                        
+                        int working = check_and_validate_proxies(test_host, test_port, timeout_ms, 1);
                         if (working > 0 && save_file && *save_file) {
                             save_validated_proxies(save_file);
                         }

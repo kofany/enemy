@@ -336,6 +336,12 @@ proxy *parse_proxy_line(char *line, enum proxy_type default_type)
         return NULL;
     }
 
+    p->validated = 0;
+    p->is_active = 0;
+    p->detected_type = PROXY_NONE;
+    p->has_auth = 0;
+    p->last_rtt_ms = 0;
+
     return p;
 }
 
@@ -415,15 +421,26 @@ void del_proxy_all(void)
 
 proxy *next_proxy(void)
 {
+    proxy *candidate;
+    proxy *start;
+
     if (!xconnect.proxy_list)
         return NULL;
 
-    if (!xconnect.current_proxy || !xconnect.current_proxy->next)
-        xconnect.current_proxy = xconnect.proxy_list;
-    else
-        xconnect.current_proxy = xconnect.current_proxy->next;
+    candidate = xconnect.current_proxy ? xconnect.current_proxy->next : xconnect.proxy_list;
+    if (!candidate)
+        candidate = xconnect.proxy_list;
 
-    return xconnect.current_proxy;
+    start = candidate;
+    do {
+        if (candidate->validated && candidate->is_active) {
+            xconnect.current_proxy = candidate;
+            return candidate;
+        }
+        candidate = candidate->next ? candidate->next : xconnect.proxy_list;
+    } while (candidate && candidate != start);
+
+    return NULL;
 }
 
 static ssize_t safe_read_with_timeout(int sockfd, void *buf, size_t count, int timeout_sec)
