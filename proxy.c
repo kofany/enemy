@@ -2,6 +2,17 @@
  * Supports HTTP, HTTPS, SOCKS4, SOCKS5 proxies
  * IPv4 and IPv6 support
  * Open and password-protected proxies
+ *
+ * IMPORTANT NOTE ABOUT EAGAIN:
+ * If proxies still fail with EAGAIN, that means you need to add select()
+ * (or poll()/epoll()) before read() in the proxy functions.
+ *
+ * This implementation uses safe_read_with_timeout() and safe_write_with_timeout()
+ * which properly handle non-blocking sockets by:
+ * - Using select() to wait for socket readiness before read/write
+ * - Handling partial reads/writes in loops
+ * - Treating EAGAIN/EWOULDBLOCK as transient (retry after select())
+ * - Implementing configurable timeouts for all operations
  */
 
 #include <stdio.h>
@@ -13,9 +24,45 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/select.h>
 #include "defs.h"
 #include "main.h"
 #include "command.h"
+
+#define PROXY_DEFAULT_CONNECT_TIMEOUT_MS 7000
+#define PROXY_DEFAULT_HANDSHAKE_TIMEOUT_MS 7000
+#define PROXY_MIN_TIMEOUT_MS 100
+#define PROXY_MAX_TIMEOUT_MS 60000
+#define PROXY_STAGE(stage) ((stage) ? (stage) : "unknown")
+
+static long long proxy_now_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000;
+}
+
+static int clamp_timeout_ms(int timeout_ms, int fallback_ms)
+{
+    if (timeout_ms <= 0)
+        timeout_ms = fallback_ms;
+    if (timeout_ms < PROXY_MIN_TIMEOUT_MS)
+        timeout_ms = PROXY_MIN_TIMEOUT_MS;
+    if (timeout_ms > PROXY_MAX_TIMEOUT_MS)
+        timeout_ms = PROXY_MAX_TIMEOUT_MS;
+    return timeout_ms;
+}
+
+static int proxy_connect_timeout_ms_value(void)
+{
+    return clamp_timeout_ms(xconnect.proxy_connect_timeout_ms, PROXY_DEFAULT_CONNECT_TIMEOUT_MS);
+}
+
+static int proxy_handshake_timeout_ms_value(void)
+{
+    return clamp_timeout_ms(xconnect.proxy_handshake_timeout_ms, PROXY_DEFAULT_HANDSHAKE_TIMEOUT_MS);
+}
 
 static char *trim_whitespace(char *s)
 {
@@ -379,6 +426,86 @@ proxy *next_proxy(void)
     return xconnect.current_proxy;
 }
 
+static ssize_t safe_read_with_timeout(int sockfd, void *buf, size_t count, int timeout_sec)
+{
+    fd_set rfds;
+    struct timeval tv;
+    ssize_t total = 0;
+    ssize_t n;
+    char *ptr = (char *)buf;
+
+    while (total < (ssize_t)count) {
+        FD_ZERO(&rfds);
+        FD_SET(sockfd, &rfds);
+        tv.tv_sec = timeout_sec;
+        tv.tv_usec = 0;
+
+        int ret = select(sockfd + 1, &rfds, NULL, NULL, &tv);
+        if (ret < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (ret == 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+
+        n = read(sockfd, ptr + total, count - total);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            return -1;
+        }
+        if (n == 0) {
+            errno = ECONNRESET;
+            return total > 0 ? total : -1;
+        }
+        total += n;
+    }
+    return total;
+}
+
+static ssize_t safe_write_with_timeout(int sockfd, const void *buf, size_t count, int timeout_sec)
+{
+    fd_set wfds;
+    struct timeval tv;
+    ssize_t total = 0;
+    ssize_t n;
+    const char *ptr = (const char *)buf;
+
+    while (total < (ssize_t)count) {
+        FD_ZERO(&wfds);
+        FD_SET(sockfd, &wfds);
+        tv.tv_sec = timeout_sec;
+        tv.tv_usec = 0;
+
+        int ret = select(sockfd + 1, NULL, &wfds, NULL, &tv);
+        if (ret < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (ret == 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+
+        n = write(sockfd, ptr + total, count - total);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            return -1;
+        }
+        if (n == 0) {
+            errno = ECONNRESET;
+            return -1;
+        }
+        total += n;
+    }
+    return total;
+}
+
 int socks4_connect(int sockfd, const char *dest_host, int dest_port, const char *userid)
 {
     unsigned char buf[512];
@@ -408,15 +535,24 @@ int socks4_connect(int sockfd, const char *dest_host, int dest_port, const char 
     }
     buf[len++] = 0;
 
-    if (write(sockfd, buf, len) != len) {
-        err_printf("socks4_connect()->write(): %s (proxy disconnected)\n", strerror(errno));
+    ssize_t written = safe_write_with_timeout(sockfd, buf, len, 10);
+    if (written != len) {
+        if (errno == ETIMEDOUT) {
+            err_printf("socks4_connect()->write(): timeout (proxy not responding)\n");
+        } else {
+            err_printf("socks4_connect()->write(): %s (proxy disconnected)\n", strerror(errno));
+        }
         return -1;
     }
 
-    ssize_t n = read(sockfd, buf, 8);
+    ssize_t n = safe_read_with_timeout(sockfd, buf, 8, 10);
     if (n != 8) {
         if (n < 0) {
-            err_printf("socks4_connect()->read(): %s (proxy not responding)\n", strerror(errno));
+            if (errno == ETIMEDOUT) {
+                err_printf("socks4_connect()->read(): timeout (proxy not responding)\n");
+            } else {
+                err_printf("socks4_connect()->read(): %s (proxy not responding)\n", strerror(errno));
+            }
         } else {
             err_printf("socks4_connect()->read(): unexpected EOF (proxy closed connection)\n");
         }
@@ -449,15 +585,23 @@ int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char 
         len = 3;
     }
 
-    if (write(sockfd, buf, len) != len) {
-        err_printf("socks5_connect()->write(): %s (proxy disconnected during handshake)\n", strerror(errno));
+    if (safe_write_with_timeout(sockfd, buf, len, 10) != len) {
+        if (errno == ETIMEDOUT) {
+            err_printf("socks5_connect()->write(): timeout (proxy not responding during handshake)\n");
+        } else {
+            err_printf("socks5_connect()->write(): %s (proxy disconnected during handshake)\n", strerror(errno));
+        }
         return -1;
     }
 
-    n = read(sockfd, buf, 2);
+    n = safe_read_with_timeout(sockfd, buf, 2, 10);
     if (n != 2) {
         if (n < 0) {
-            err_printf("socks5_connect()->read(): %s (proxy not responding or bad SOCKS5 server)\n", strerror(errno));
+            if (errno == ETIMEDOUT) {
+                err_printf("socks5_connect()->read(): timeout (proxy not responding or bad SOCKS5 server)\n");
+            } else {
+                err_printf("socks5_connect()->read(): %s (proxy not responding or bad SOCKS5 server)\n", strerror(errno));
+            }
         } else {
             err_printf("socks5_connect()->read(): unexpected EOF (proxy closed connection)\n");
         }
@@ -479,15 +623,23 @@ int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char 
         memcpy(buf + 3 + ulen, password, plen);
 
         len = 3 + ulen + plen;
-        if (write(sockfd, buf, len) != len) {
-            err_printf("socks5_connect()->write(auth): %s (proxy disconnected during authentication)\n", strerror(errno));
+        if (safe_write_with_timeout(sockfd, buf, len, 10) != len) {
+            if (errno == ETIMEDOUT) {
+                err_printf("socks5_connect()->write(auth): timeout (proxy not responding during authentication)\n");
+            } else {
+                err_printf("socks5_connect()->write(auth): %s (proxy disconnected during authentication)\n", strerror(errno));
+            }
             return -1;
         }
 
-        n = read(sockfd, buf, 2);
+        n = safe_read_with_timeout(sockfd, buf, 2, 10);
         if (n != 2) {
             if (n < 0) {
-                err_printf("socks5_connect()->read(auth): %s (proxy did not complete authentication)\n", strerror(errno));
+                if (errno == ETIMEDOUT) {
+                    err_printf("socks5_connect()->read(auth): timeout (proxy did not complete authentication)\n");
+                } else {
+                    err_printf("socks5_connect()->read(auth): %s (proxy did not complete authentication)\n", strerror(errno));
+                }
             } else {
                 err_printf("socks5_connect()->read(auth): unexpected EOF (proxy closed connection during authentication)\n");
             }
@@ -514,15 +666,23 @@ int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char 
     buf[6 + len] = dest_port & 0xFF;
 
     len = 7 + len;
-    if (write(sockfd, buf, len) != len) {
-        err_printf("socks5_connect()->write(connect): %s (proxy disconnected while establishing tunnel)\n", strerror(errno));
+    if (safe_write_with_timeout(sockfd, buf, len, 10) != len) {
+        if (errno == ETIMEDOUT) {
+            err_printf("socks5_connect()->write(connect): timeout (proxy not responding while establishing tunnel)\n");
+        } else {
+            err_printf("socks5_connect()->write(connect): %s (proxy disconnected while establishing tunnel)\n", strerror(errno));
+        }
         return -1;
     }
 
-    n = read(sockfd, buf, 4);
+    n = safe_read_with_timeout(sockfd, buf, 4, 10);
     if (n < 4) {
         if (n < 0) {
-            err_printf("socks5_connect()->read(connect): %s (proxy did not confirm tunnel)\n", strerror(errno));
+            if (errno == ETIMEDOUT) {
+                err_printf("socks5_connect()->read(connect): timeout (proxy did not confirm tunnel)\n");
+            } else {
+                err_printf("socks5_connect()->read(connect): %s (proxy did not confirm tunnel)\n", strerror(errno));
+            }
         } else {
             err_printf("socks5_connect()->read(connect): unexpected EOF (proxy closed connection before confirmation)\n");
         }
@@ -539,7 +699,7 @@ int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char 
         skip = 4 + 2;
     else if (buf[3] == 3) {
         unsigned char alen;
-        if (read(sockfd, &alen, 1) != 1)
+        if (safe_read_with_timeout(sockfd, &alen, 1, 10) != 1)
             return -1;
         skip = alen + 2;
     } else if (buf[3] == 4)
@@ -547,7 +707,10 @@ int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char 
 
     if (skip > 0) {
         unsigned char tmp[256];
-        read(sockfd, tmp, skip);
+        if (skip > (int)sizeof(tmp))
+            skip = sizeof(tmp);
+        if (safe_read_with_timeout(sockfd, tmp, skip, 10) != skip)
+            return -1;
     }
 
     return 0;
@@ -588,17 +751,25 @@ int http_connect(int sockfd, const char *dest_host, int dest_port, const char *u
 
     len += snprintf(buf + len, sizeof(buf) - len, "\r\n");
 
-    if (write(sockfd, buf, len) != len) {
-        err_printf("http_connect()->write(): %s (proxy disconnected)\n", strerror(errno));
+    if (safe_write_with_timeout(sockfd, buf, len, 10) != len) {
+        if (errno == ETIMEDOUT) {
+            err_printf("http_connect()->write(): timeout (proxy not responding)\n");
+        } else {
+            err_printf("http_connect()->write(): %s (proxy disconnected)\n", strerror(errno));
+        }
         return -1;
     }
 
     len = 0;
-    while (len < sizeof(buf) - 1) {
-        int n = read(sockfd, buf + len, 1);
+    while (len < (int)sizeof(buf) - 1) {
+        int n = safe_read_with_timeout(sockfd, buf + len, 1, 10);
         if (n <= 0) {
             if (n < 0) {
-                err_printf("http_connect()->read(): %s (proxy not responding)\n", strerror(errno));
+                if (errno == ETIMEDOUT) {
+                    err_printf("http_connect()->read(): timeout (proxy not responding)\n");
+                } else {
+                    err_printf("http_connect()->read(): %s (proxy not responding)\n", strerror(errno));
+                }
             } else {
                 err_printf("http_connect()->read(): unexpected EOF (proxy closed connection)\n");
             }

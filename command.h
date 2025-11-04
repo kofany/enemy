@@ -43,7 +43,12 @@ struct proxy_t {
     char *username;
     char *password;
     enum proxy_type type;
+    enum proxy_type detected_type;
     int is_ipv6;
+    int is_active;
+    int has_auth;
+    int validated;
+    int last_rtt_ms;
     struct sockaddr_in addr;
     struct sockaddr_in6 addr6;
     proxy *next, *parent;
@@ -78,6 +83,10 @@ struct xaddress_t {
     vhost *vhost, *vhosttail;
     char *bncserver, *bncpass; 
     int bncport;
+    int proxy_connect_timeout_ms;
+    int proxy_handshake_timeout_ms;
+    int proxy_loader_concurrency;
+    int proxy_loader_timeout_ms;
 };
 extern xaddress xconnect;
 extern struct timeval tv_ping, tv_log;
@@ -128,4 +137,6 @@ int connect_through_proxy(int sockfd, proxy *p, const char *dest_host, int dest_
 int socks4_connect(int sockfd, const char *dest_host, int dest_port, const char *userid);
 int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char *username, const char *password);
 int http_connect(int sockfd, const char *dest_host, int dest_port, const char *username, const char *password);
+int check_and_validate_proxies(const char *test_host, int test_port, int timeout_ms, int verbose);
+int save_validated_proxies(const char *filename);
 #endif

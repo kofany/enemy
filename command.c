@@ -1811,7 +1811,9 @@ void parse_input(void)
                     default: info_printf("Unknown\n"); break;
                 }
             } else {
-                help_printf("Usage: proxy <socks4|socks5|http|https> <filename>\n");
+                help_printf("Usage: proxy <filename> [options]\n");
+                help_printf("       proxy <socks4|socks5|http|https> <filename>\n");
+                help_printf("       proxy check [--timeout <ms>] [--save <file>]\n");
                 help_printf("       proxy clear\n");
             }
         } else {
@@ -1819,9 +1821,43 @@ void parse_input(void)
             if (!x_strcasecmp(w, "clear") || !x_strcasecmp(w, "del")) {
                 del_proxy_all();
                 info_printf("Proxy list cleared.\n");
+            } else if (!x_strcasecmp(w, "check") || !x_strcasecmp(w, "validate")) {
+                int timeout_ms = 5000;
+                char *save_file = NULL;
+                char *test_host = "irc.libera.chat";
+                int test_port = 6667;
+
+                while (*cmd) {
+                    char *opt = newsplit(&cmd);
+                    if (!x_strcasecmp(opt, "--timeout")) {
+                        char *val = newsplit(&cmd);
+                        if (val && *val) {
+                            timeout_ms = atoi(val);
+                            if (timeout_ms < 100) timeout_ms = 100;
+                            if (timeout_ms > 60000) timeout_ms = 60000;
+                        }
+                    } else if (!x_strcasecmp(opt, "--save")) {
+                        save_file = newsplit(&cmd);
+                    } else if (!x_strcasecmp(opt, "--test-host")) {
+                        test_host = newsplit(&cmd);
+                    } else if (!x_strcasecmp(opt, "--test-port")) {
+                        char *val = newsplit(&cmd);
+                        if (val && *val) {
+                            test_port = atoi(val);
+                        }
+                    }
+                }
+
+                int working = check_and_validate_proxies(test_host, test_port, timeout_ms, 1);
+                if (working > 0 && save_file && *save_file) {
+                    save_validated_proxies(save_file);
+                }
             } else {
                 enum proxy_type ptype = PROXY_NONE;
                 char *filename = NULL;
+                int do_check = 0;
+                int timeout_ms = 5000;
+                char *save_file = NULL;
 
                 if (!x_strcasecmp(w, "http"))
                     ptype = PROXY_HTTP;
@@ -1846,10 +1882,32 @@ void parse_input(void)
                     return;
                 }
 
+                while (*cmd) {
+                    char *opt = newsplit(&cmd);
+                    if (!x_strcasecmp(opt, "--check") || !x_strcasecmp(opt, "-c")) {
+                        do_check = 1;
+                    } else if (!x_strcasecmp(opt, "--timeout")) {
+                        char *val = newsplit(&cmd);
+                        if (val && *val) {
+                            timeout_ms = atoi(val);
+                        }
+                    } else if (!x_strcasecmp(opt, "--save")) {
+                        save_file = newsplit(&cmd);
+                    }
+                }
+
                 int ret = load_proxies(filename, ptype);
                 if (ret > 0) {
                     if (xconnect.log_fd) {
                         logit(">> .proxy loaded %d proxies from %s\n", ret, filename);
+                    }
+
+                    if (do_check) {
+                        info_printf("Validating proxies...\n");
+                        int working = check_and_validate_proxies("irc.libera.chat", 6667, timeout_ms, 1);
+                        if (working > 0 && save_file && *save_file) {
+                            save_validated_proxies(save_file);
+                        }
                     }
                 }
             }
