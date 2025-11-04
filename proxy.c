@@ -17,14 +17,40 @@
 #include "main.h"
 #include "command.h"
 
+static char *trim_whitespace(char *s)
+{
+    char *end;
+
+    if (!s)
+        return s;
+
+    while (*s && isspace((unsigned char)*s))
+        s++;
+
+    if (*s == '\0')
+        return s;
+
+    end = s + strlen(s) - 1;
+    while (end > s && isspace((unsigned char)*end))
+        *end-- = '\0';
+    if (isspace((unsigned char)*end))
+        *end = '\0';
+
+    return s;
+}
+
 proxy *parse_proxy_line(char *line, enum proxy_type default_type)
 {
     proxy *p;
-    char *scheme_end, *at_sign, *colon1, *colon2, *colon3, *bracket_start, *bracket_end;
     char buffer[MAX_PROXY_LINE];
     char *work;
     enum proxy_type ptype = default_type;
     int is_ipv6 = 0;
+    char *scheme_end;
+    char *prefix_user = NULL, *prefix_pass = NULL;
+    char *suffix_user = NULL, *suffix_pass = NULL;
+    char *port_token = NULL;
+    char *host_token = NULL;
 
     if (!line || !*line)
         return NULL;
@@ -36,10 +62,17 @@ proxy *parse_proxy_line(char *line, enum proxy_type default_type)
         if (*s == '\n' || *s == '\r')
             *s = '\0';
 
-    work = buffer;
-    while (isspace(*work)) work++;
+    work = trim_whitespace(buffer);
     if (!*work || *work == '#')
         return NULL;
+
+    size_t wlen = strlen(work);
+    if (wlen > 2 && work[0] == '[' && work[wlen - 1] == ']' && strchr(work + 1, '@')) {
+        work[wlen - 1] = '\0';
+        work = trim_whitespace(work + 1);
+        if (!*work)
+            return NULL;
+    }
 
     p = (proxy *)calloc(1, sizeof(proxy));
     if (!p) {
@@ -58,96 +91,200 @@ proxy *parse_proxy_line(char *line, enum proxy_type default_type)
             ptype = PROXY_SOCKS4;
         else if (!x_strcasecmp(work, "socks5"))
             ptype = PROXY_SOCKS5;
-        work = scheme_end + 3;
+        work = trim_whitespace(scheme_end + 3);
     }
     p->type = ptype;
 
-    at_sign = strchr(work, '@');
+    char *at_sign = strrchr(work, '@');
     if (at_sign) {
         *at_sign = '\0';
-        char *user_pass = work;
-        work = at_sign + 1;
+        char *user_pass = trim_whitespace(work);
+        work = trim_whitespace(at_sign + 1);
 
-        colon1 = strchr(user_pass, ':');
-        if (colon1) {
-            *colon1 = '\0';
-            p->username = strdup(user_pass);
-            p->password = strdup(colon1 + 1);
-        } else {
-            p->username = strdup(user_pass);
-        }
-    }
-
-    bracket_start = strchr(work, '[');
-    if (bracket_start) {
-        is_ipv6 = 1;
-        bracket_end = strchr(bracket_start, ']');
-        if (!bracket_end) {
-            del_proxy(p);
-            return NULL;
-        }
-        *bracket_end = '\0';
-        p->host = strdup(bracket_start + 1);
-        work = bracket_end + 1;
-        if (*work == ':') {
-            p->port = atoi(work + 1);
+        if (*user_pass) {
+            char *pass_sep = strchr(user_pass, ':');
+            if (pass_sep) {
+                *pass_sep = '\0';
+                prefix_user = trim_whitespace(user_pass);
+                prefix_pass = trim_whitespace(pass_sep + 1);
+            } else {
+                prefix_user = user_pass;
+            }
         }
     } else {
-        colon1 = strchr(work, ':');
-        if (!colon1) {
-            del_proxy(p);
-            return NULL;
-        }
-        *colon1 = '\0';
-        p->host = strdup(work);
-        work = colon1 + 1;
-
-        colon2 = strchr(work, ':');
-        if (colon2) {
-            *colon2 = '\0';
-            p->port = atoi(work);
-            work = colon2 + 1;
-
-            colon3 = strchr(work, ':');
-            if (colon3) {
-                *colon3 = '\0';
-                if (!p->username)
-                    p->username = strdup(work);
-                if (!p->password)
-                    p->password = strdup(colon3 + 1);
-            } else {
-                if (!p->username && *work)
-                    p->username = strdup(work);
-            }
-        } else {
-            p->port = atoi(work);
-        }
+        work = trim_whitespace(work);
     }
 
-    if (!p->host || p->port <= 0 || p->port > 65535) {
+    if (!*work) {
         del_proxy(p);
         return NULL;
     }
 
-    p->is_ipv6 = is_ipv6;
+    if (*work == '[') {
+        char *closing = strchr(work, ']');
+        if (!closing) {
+            del_proxy(p);
+            return NULL;
+        }
+        *closing = '\0';
+        host_token = trim_whitespace(work + 1);
+        char *rest = trim_whitespace(closing + 1);
+        if (*rest == ':') {
+            rest = trim_whitespace(rest + 1);
+        } else if (*rest != '\0') {
+            del_proxy(p);
+            return NULL;
+        } else {
+            del_proxy(p);
+            return NULL;
+        }
 
-    struct addrinfo hints, *result;
+        if (!*rest) {
+            del_proxy(p);
+            return NULL;
+        }
+
+        char *after_port = strchr(rest, ':');
+        if (after_port) {
+            *after_port = '\0';
+            suffix_user = trim_whitespace(after_port + 1);
+            if (suffix_user && *suffix_user) {
+                char *after_user = strchr(suffix_user, ':');
+                if (after_user) {
+                    *after_user = '\0';
+                    suffix_pass = trim_whitespace(after_user + 1);
+                }
+            }
+        }
+
+        port_token = trim_whitespace(rest);
+        is_ipv6 = 1;
+    } else {
+        char *tmp = work;
+        char *parts[4] = {0};
+        int part_count = 0;
+
+        while (tmp && part_count < 4) {
+            parts[part_count++] = tmp;
+            char *colon = strchr(tmp, ':');
+            if (!colon) {
+                tmp = NULL;
+                break;
+            }
+            *colon = '\0';
+            tmp = colon + 1;
+        }
+
+        if (tmp && part_count == 4 && *tmp) {
+            tmp = trim_whitespace(tmp);
+            if (*tmp) {
+                size_t len = strlen(parts[3]);
+                parts[3][len] = ':';
+                strcpy(parts[3] + len + 1, tmp);
+            }
+        }
+
+        if (part_count < 2) {
+            del_proxy(p);
+            return NULL;
+        }
+
+        host_token = trim_whitespace(parts[0]);
+        port_token = trim_whitespace(parts[1]);
+
+        if (!*host_token || !*port_token) {
+            del_proxy(p);
+            return NULL;
+        }
+
+        if (part_count >= 3)
+            suffix_user = trim_whitespace(parts[2]);
+        if (part_count >= 4)
+            suffix_pass = trim_whitespace(parts[3]);
+    }
+
+    if (!host_token || !*host_token || !port_token || !*port_token) {
+        del_proxy(p);
+        return NULL;
+    }
+
+    p->host = strdup(host_token);
+    if (!p->host) {
+        err_printf("parse_proxy_line()->strdup(host): %s\n", strerror(errno));
+        del_proxy(p);
+        return NULL;
+    }
+
+    char *endptr;
+    long port = strtol(port_token, &endptr, 10);
+    while (*endptr && isspace((unsigned char)*endptr))
+        endptr++;
+    if (*endptr != '\0' || port <= 0 || port > 65535) {
+        del_proxy(p);
+        return NULL;
+    }
+    p->port = (int)port;
+
+    if (prefix_user && *prefix_user) {
+        p->username = strdup(prefix_user);
+        if (!p->username) {
+            err_printf("parse_proxy_line()->strdup(user): %s\n", strerror(errno));
+            del_proxy(p);
+            return NULL;
+        }
+    }
+
+    if (prefix_pass && *prefix_pass) {
+        p->password = strdup(prefix_pass);
+        if (!p->password) {
+            err_printf("parse_proxy_line()->strdup(pass): %s\n", strerror(errno));
+            del_proxy(p);
+            return NULL;
+        }
+    }
+
+    if (!p->username && suffix_user && *suffix_user) {
+        p->username = strdup(suffix_user);
+        if (!p->username) {
+            err_printf("parse_proxy_line()->strdup(user): %s\n", strerror(errno));
+            del_proxy(p);
+            return NULL;
+        }
+    }
+
+    if (!p->password && suffix_pass && *suffix_pass) {
+        p->password = strdup(suffix_pass);
+        if (!p->password) {
+            err_printf("parse_proxy_line()->strdup(pass): %s\n", strerror(errno));
+            del_proxy(p);
+            return NULL;
+        }
+    }
+
+    struct addrinfo hints, *result = NULL;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = is_ipv6 ? AF_INET6 : AF_INET;
+    hints.ai_family = is_ipv6 ? AF_INET6 : AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
     char port_str[6];
     snprintf(port_str, sizeof(port_str), "%d", p->port);
 
-    if (getaddrinfo(p->host, port_str, &hints, &result) == 0) {
+    if (getaddrinfo(p->host, port_str, &hints, &result) == 0 && result) {
         if (result->ai_family == AF_INET6) {
             memcpy(&p->addr6, result->ai_addr, sizeof(struct sockaddr_in6));
             p->is_ipv6 = 1;
-        } else {
+        } else if (result->ai_family == AF_INET) {
             memcpy(&p->addr, result->ai_addr, sizeof(struct sockaddr_in));
+            p->is_ipv6 = 0;
+        } else {
+            freeaddrinfo(result);
+            del_proxy(p);
+            return NULL;
         }
         freeaddrinfo(result);
     } else {
+        if (result)
+            freeaddrinfo(result);
         del_proxy(p);
         return NULL;
     }
