@@ -138,6 +138,13 @@ void kill_clone(enemy *c, int print)
         cdel_printf("Killing clone %s.\n", c->nick);
     }
     
+    if (c->connection_in_progress) {
+        c->connection_in_progress = 0;
+        if (xconnect.active_connects > 0) {
+            xconnect.active_connects--;
+        }
+    }
+    
 #ifdef _ENEMY_DEBUG
     fprintf(fdebug, "+ Killing clone %s (xcnt=%d, xall=%d, xcon=%d)\n",
             c->nick, xcnt, xall, xconnect.connecting);

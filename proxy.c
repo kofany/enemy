@@ -26,6 +26,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/select.h>
+#include <time.h>
 #include "defs.h"
 #include "main.h"
 #include "command.h"
@@ -423,6 +424,7 @@ proxy *next_proxy(void)
 {
     proxy *candidate;
     proxy *start;
+    time_t now = time(NULL);
 
     if (!xconnect.proxy_list)
         return NULL;
@@ -434,6 +436,10 @@ proxy *next_proxy(void)
     start = candidate;
     do {
         if (candidate->validated && candidate->is_active) {
+            if (candidate->failure_count > 0 && candidate->next_retry > now) {
+                candidate = candidate->next ? candidate->next : xconnect.proxy_list;
+                continue;
+            }
             xconnect.current_proxy = candidate;
             return candidate;
         }
@@ -441,6 +447,34 @@ proxy *next_proxy(void)
     } while (candidate && candidate != start);
 
     return NULL;
+}
+
+void mark_proxy_failure(proxy *p)
+{
+    if (!p)
+        return;
+    
+    time_t now = time(NULL);
+    p->failure_count++;
+    p->last_failure = now;
+    
+    int backoff = 30;
+    if (p->failure_count >= 3) {
+        backoff = 300;
+    } else if (p->failure_count >= 2) {
+        backoff = 120;
+    }
+    
+    p->next_retry = now + backoff;
+}
+
+void mark_proxy_success(proxy *p)
+{
+    if (!p)
+        return;
+    
+    p->failure_count = 0;
+    p->next_retry = 0;
 }
 
 static ssize_t safe_read_with_timeout(int sockfd, void *buf, size_t count, int timeout_sec)

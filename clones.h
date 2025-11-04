@@ -1,9 +1,17 @@
 #ifndef __CLONES_H
 #define __CLONES_H
 
+#include <time.h>
+
+struct proxy_session;
+
 struct clone_t {
     int fd, connected, pp, cnt, hash, read_last, rejoins;
     char *nick, *address, *read_buf, *rejoin_buf;
+    int retry_count;
+    time_t last_retry_time;
+    int connection_in_progress;
+    struct proxy_session *proxy_session;
 #ifdef _USE_POLL
     struct pollfd *pfd;
 #endif
