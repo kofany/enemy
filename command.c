@@ -2068,7 +2068,7 @@ static struct server_info *next_server_entry(void)
     return srv;
 }
 
-void do_connect(void)
+static int do_single_connect_attempt(void)
 {
     enemy *p;
     struct server_info *current_server;
@@ -2077,30 +2077,23 @@ void do_connect(void)
     int bind_required = 0;
 
     if ((!xconnect.servers || xconnect.num_servers == 0)) {
-        err_printf("do_connect(): No servers configured.\n");
-        delete_connect_all();
-        return;
+        return -1;
     }
 
     if (!xconnect.proxy_list && !xconnect.bncserver && xconnect.vhost == 0) {
-        err_printf("do_connect(): No vhosts configured for direct connections.\n");
-        delete_connect_all();
-        return;
+        return -1;
     }
 
     current_server = next_server_entry();
     if (!current_server) {
-        err_printf("do_connect(): Unable to select server entry.\n");
-        delete_connect_all();
-        return;
+        return -1;
     }
 
     if (xconnect.proxy_list) {
         current_proxy = next_proxy();
         if (!current_proxy) {
-            err_printf("do_connect(): No proxies available.\n");
-            delete_connect_all();
-            return;
+            err_printf("do_connect(): No proxies available at this time (all temporarily failed).\n");
+            return -1;
         }
         socket_family = current_proxy->is_ipv6 ? AF_INET6 : AF_INET;
         cadd_printf("Connecting #%d via %s:%d to %s (%d left)\n",
@@ -2118,20 +2111,13 @@ void do_connect(void)
                     xconnect.connecting - 1);
     }
 
-    if (--xconnect.connecting > 0) {
-        if (!xconnect.proxy_list) {
-            xconnect.timer = xconnect.delay;
-            if (xconnect.delay > 0 && debuglvl > 0)
-                info_printf("Delaying next connect()..\n");
-        } else {
-            xconnect.timer = 0;
-        }
-    }
-
     if ((p = new_clone(socket_family)) == 0) {
-        delete_connect_all();
-        return;
+        return -1;
     }
+    
+    p->connection_in_progress = 1;
+    p->retry_count = 0;
+    p->last_retry_time = time(NULL);
 
     if (bind_required) {
         if (socket_family == AF_INET6) {
@@ -2142,10 +2128,9 @@ void do_connect(void)
                 if (lastvhost)
                     del_vhost(lastvhost, 1);
                 if (xconnect.vhost == 0)
-                    delete_connect_all();
-                else
-                    xconnect.connecting++;
-                return;
+                    return -1;
+                xconnect.connecting++;
+                return -1;
             }
         } else {
             struct sockaddr *sa = next_vhost();
@@ -2155,10 +2140,9 @@ void do_connect(void)
                 if (lastvhost)
                     del_vhost(lastvhost, 1);
                 if (xconnect.vhost == 0)
-                    delete_connect_all();
-                else
-                    xconnect.connecting++;
-                return;
+                    return -1;
+                xconnect.connecting++;
+                return -1;
             }
         }
     }
@@ -2170,12 +2154,18 @@ void do_connect(void)
         if (connect_through_proxy(p->fd, current_proxy, current_server->ircserver, current_server->ircport) != 0) {
             err_printf("do_connect(): Proxy negotiation failed for %s via %s:%d\n",
                        current_server->ircserver, current_proxy->host, current_proxy->port);
+            mark_proxy_failure(current_proxy);
             kill_clone(p, 1);
-            xconnect.connecting++;
-            return;
+            
+            if (xconnect.connecting < xconnect.max_retry_attempts) {
+                xconnect.connecting++;
+            }
+            return -1;
         }
 
+        mark_proxy_success(current_proxy);
         p->connected = 2;
+        p->connection_in_progress = 0;
 #ifdef _USE_POLL
         SET_READ_EVENT(p->pfd);
 #endif
@@ -2184,7 +2174,7 @@ void do_connect(void)
             xsend(p->fd, "PASS %s\n", xconnect.bncpass);
         }
         xsend(p->fd, "USER %s 0 * :%s\n", random_ident(), "fikumiku");
-        return;
+        return 0;
     }
 
     if (connect(p->fd, (struct sockaddr *)&current_server->addr, current_server->addrlen) == -1) {
@@ -2193,15 +2183,77 @@ void do_connect(void)
 #ifdef _USE_POLL
             SET_WRITE_EVENT(p->pfd);
 #endif
+            return 0;
         } else {
             err_printf("do_connect()->connect(): %s\n", strerror(errno));
             kill_clone(p, 1);
             if (bind_required && lastvhost)
                 del_vhost(lastvhost, 1);
             if (xconnect.vhost == 0)
+                return -1;
+            xconnect.connecting++;
+            return -1;
+        }
+    }
+
+    p->connected = 2;
+    p->connection_in_progress = 0;
+#ifdef _USE_POLL
+    SET_READ_EVENT(p->pfd);
+#endif
+    xsend(p->fd, "NICK %s\n", p->nick);
+    if (xconnect.bncserver) {
+        xsend(p->fd, "PASS %s\n", xconnect.bncpass);
+    }
+    xsend(p->fd, "USER %s 0 * :%s\n", random_ident(), "fikumiku");
+    return 0;
+}
+
+void do_connect(void)
+{
+    int concurrent_limit;
+    int attempts_this_call = 0;
+    int max_attempts_per_call = 5;
+
+    if ((!xconnect.servers || xconnect.num_servers == 0)) {
+        err_printf("do_connect(): No servers configured.\n");
+        delete_connect_all();
+        return;
+    }
+
+    if (!xconnect.proxy_list && !xconnect.bncserver && xconnect.vhost == 0) {
+        err_printf("do_connect(): No vhosts configured for direct connections.\n");
+        delete_connect_all();
+        return;
+    }
+
+    if (xconnect.proxy_list) {
+        concurrent_limit = xconnect.max_concurrent_connections;
+    } else {
+        concurrent_limit = 1;
+    }
+
+    while (xconnect.connecting > 0 && xconnect.active_connects < concurrent_limit && attempts_this_call < max_attempts_per_call) {
+        if (--xconnect.connecting < 0) {
+            xconnect.connecting = 0;
+            break;
+        }
+
+        if (do_single_connect_attempt() == -1) {
+            if (xconnect.connecting == 0 && xconnect.active_connects == 0) {
                 delete_connect_all();
-            else
-                xconnect.connecting++;
+                return;
+            }
+        }
+        
+        attempts_this_call++;
+    }
+
+    if (xconnect.connecting > 0) {
+        if (!xconnect.proxy_list) {
+            xconnect.timer = xconnect.delay;
+        } else {
+            xconnect.timer = 0;
         }
     }
 }

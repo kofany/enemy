@@ -3,6 +3,7 @@
 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <time.h>
 
 // d
 #define MAX_CMDLEN    2048
@@ -49,6 +50,9 @@ struct proxy_t {
     int has_auth;
     int validated;
     int last_rtt_ms;
+    int failure_count;
+    time_t last_failure;
+    time_t next_retry;
     struct sockaddr_in addr;
     struct sockaddr_in6 addr6;
     proxy *next, *parent;
@@ -61,6 +65,8 @@ struct server_info {
     socklen_t addrlen;
     int is_ipv6;
 };
+
+struct proxy_session;
 
 struct xaddress_t {
     char *ircserver;              // Zachowujemy dla kompatybilności
@@ -87,6 +93,10 @@ struct xaddress_t {
     int proxy_handshake_timeout_ms;
     int proxy_loader_concurrency;
     int proxy_loader_timeout_ms;
+    int max_concurrent_connections;
+    int max_retry_attempts;
+    int retry_backoff_sec;
+    int active_connects;
 };
 extern xaddress xconnect;
 extern struct timeval tv_ping, tv_log;
@@ -139,4 +149,6 @@ int socks5_connect(int sockfd, const char *dest_host, int dest_port, const char 
 int http_connect(int sockfd, const char *dest_host, int dest_port, const char *username, const char *password);
 int check_and_validate_proxies(const char *test_host, int test_port, int timeout_ms, int verbose);
 int save_validated_proxies(const char *filename);
+void mark_proxy_failure(proxy *p);
+void mark_proxy_success(proxy *p);
 #endif
