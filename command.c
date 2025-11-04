@@ -105,8 +105,8 @@ void parse_input(void)
         struct hostent *host;
         int s;
 
-        if (xconnect.bncserver == 0 && xconnect.vhost == 0) {
-            err_printf("Vhost list is empty, try .vhost scan.\n");
+        if (xconnect.bncserver == 0 && xconnect.vhost == 0 && xconnect.proxy_list == NULL) {
+            err_printf("Vhost list is empty, try .vhost scan, or configure proxies with .proxy.\n");
             return;
         }
 
@@ -1911,13 +1911,13 @@ void do_connect(void)
     int socket_family;
     int bind_required = 0;
 
-    if ((!xconnect.servers || xconnect.num_servers == 0) && xconnect.proxy_list == NULL) {
+    if ((!xconnect.servers || xconnect.num_servers == 0)) {
         err_printf("do_connect(): No servers configured.\n");
         delete_connect_all();
         return;
     }
 
-    if (!xconnect.proxy_list && xconnect.vhost == 0) {
+    if (!xconnect.proxy_list && !xconnect.bncserver && xconnect.vhost == 0) {
         err_printf("do_connect(): No vhosts configured for direct connections.\n");
         delete_connect_all();
         return;
