@@ -478,9 +478,9 @@ void set_signals(void)
     signal(SIGUSR1, enemy_exit);
     signal(SIGSEGV, enemy_exit);
     signal(SIGUSR2, enemy_exit);
-    signal(SIGPIPE, enemy_exit);
+    signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, enemy_exit);
-    signal(SIGCHLD, enemy_exit);
+    signal(SIGCHLD, SIG_IGN);
 //    signal(SIGCONT, enemy_exit);
 //    signal(SIGSTOP, enemy_exit);
 //    signal(SIGTSTP, enemy_exit);
