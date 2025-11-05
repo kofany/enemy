@@ -1192,10 +1192,15 @@ void parse_clone(register enemy *p)
         return;
     } else if (!x_strcmp(w, "001")){ // DONE
         if (x_strcasecmp(xconnect.ircserver, nick)) {
-            xdebug(1, "%s claims to be %s%s%s, updating name.\n",
-                    xconnect.ircserver, COLOR_WHITE, nick, COLOR_NORMAL);
-            free(xconnect.ircserver);
-            xconnect.ircserver = strdup(nick);
+            if (!x_strcasecmp(nick, "irc.oowoo.cc")) {
+                xdebug(2, "%s claims to be %s%s%s, ignoring alias.\n",
+                        xconnect.ircserver, COLOR_WHITE, nick, COLOR_NORMAL);
+            } else {
+                xdebug(1, "%s claims to be %s%s%s, updating name.\n",
+                        xconnect.ircserver, COLOR_WHITE, nick, COLOR_NORMAL);
+                free(xconnect.ircserver);
+                xconnect.ircserver = strdup(nick);
+            }
         }
         for (w = read_str; *w; w++)
             ;
