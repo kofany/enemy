@@ -92,9 +92,22 @@ void parse_input(void)
     enemy *p;
 
 
-    fgets(cmdline, MAX_CMDLEN, stdin);
-    cmdline[strlen(cmdline)-1] = 0;
-    
+    if (!fgets(cmdline, MAX_CMDLEN, stdin)) {
+        if (feof(stdin)) {
+            clearerr(stdin);
+        } else {
+            err_printf("stdin read error: %s\n", strerror(errno));
+        }
+        return;
+    }
+
+    size_t len = strlen(cmdline);
+    if (len && cmdline[len-1] == '\n')
+        cmdline[--len] = 0;
+
+    if (!len)
+        return;
+
     if (*cmd == '/' || *cmd == '.')
         cmd++;
 
@@ -2155,11 +2168,16 @@ static int do_single_connect_attempt(void)
             err_printf("do_connect(): Proxy negotiation failed for %s via %s:%d\n",
                        current_server->ircserver, current_proxy->host, current_proxy->port);
             mark_proxy_failure(current_proxy);
-            kill_clone(p, 1);
             
-            if (xconnect.connecting < xconnect.max_retry_attempts) {
+            if (p->retry_count < xconnect.max_retry_attempts) {
+                p->retry_count++;
                 xconnect.connecting++;
+                xconnect.timer = xconnect.retry_backoff_sec;
+                info_printf("Queued reconnect attempt %d/%d for %s after proxy timeout\n",
+                           p->retry_count, xconnect.max_retry_attempts, p->nick);
             }
+            
+            kill_clone(p, 1);
             return -1;
         }
 
