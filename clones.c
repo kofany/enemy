@@ -184,7 +184,7 @@ void kill_clone(enemy *c, int print)
         }
     }
 
-    if (!xall && !xconnect.connecting) {    
+    if (!xall && !xconnect.connecting && !xconnect.active_connects) {    
         if (xconnect.log_fd) {
             logit("<< All clones has been killed.\n");
         }
